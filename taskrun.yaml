@@ -1,0 +1,58 @@
+apiVersion: tekton.dev/v1alpha1
+kind: TaskRun
+metadata:
+  generateName: build-distroless-
+spec:
+  resources:
+    inputs:
+      - name: repo
+        resourceSpec:
+          type: git
+          params:
+            - name: url
+              value: https://github.com/GoogleContainerTools/distroless
+  taskSpec:
+    resources:
+      inputs:
+      - name: repo
+        type: git
+    results:
+      - name: IMAGE_DIGEST
+      - name: IMAGE_URL
+
+    steps:
+    - name: build
+      image: gcr.io/dlorenc-vmtest2/bazel
+      script: |
+        #!/usr/bin/env bash
+        set -x
+
+        cd $(inputs.resources.repo.path)
+
+        gcloud auth configure-docker
+        gcloud auth list
+        bazel build //package_manager:dpkg_parser.par
+
+        # Optional: trigger building package bundles without concurrency to avoid
+        # flakiness: https://github.com/GoogleContainerTools/distroless/issues/646
+        bazel build --jobs=1 --host_force_python=PY2 @package_bundle_amd64_debian10//file:packages.bzl
+        bazel build --jobs=1 --host_force_python=PY2 @package_bundle_arm_debian10//file:packages.bzl
+        bazel build --jobs=1 --host_force_python=PY2 @package_bundle_arm64_debian10//file:packages.bzl
+        bazel build --jobs=1 --host_force_python=PY2 @package_bundle_s390x_debian10//file:packages.bzl
+        bazel build --jobs=1 --host_force_python=PY2 @package_bundle_ppc64le_debian10//file:packages.bzl
+
+        export PROJECT_ID=dlorenc-vmtest2
+        export COMMIT_SHA=$(git rev-parse HEAD)
+        bazel run --host_force_python=PY2 //:publish
+
+        # bazel build //base:static_root_amd64_debian10.tar
+        # cp bazel-bin/base/static_root_amd64_debian10.tar .
+
+        echo "gcr.io/dlorenc-vmtest2/static" > $(results.IMAGE_URL.path)
+
+        echo $COMMIT_SHA > COMMIT
+
+    - name: crane
+      image: gcr.io/go-containerregistry/crane:debug
+      command: ["sh"]
+      args: ["-c", "set -x; cd /workspace/repo && crane digest gcr.io/dlorenc-vmtest2/static:$(cat COMMIT) > $(results.IMAGE_DIGEST.path) && cat $(results.IMAGE_DIGEST.path)"]
